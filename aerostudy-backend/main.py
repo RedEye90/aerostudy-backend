@@ -1,16 +1,102 @@
+import os
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List
 from data import CPL_SUBJECTS, AME_MODULES
 
-app = FastAPI(title="AeroStudy API", version="1.0.0")
+app = FastAPI(title="AeroStudy API", version="2.0.0")
 
 # Allow Android WebView & browser to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# ─────────────────────────────────────────────────────────
+#  AI TEACHER  –  Claude API se real response
+#  Render.com pe ANTHROPIC_API_KEY env variable set karo
+# ─────────────────────────────────────────────────────────
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+AI_SYSTEM_PROMPT = """Tu AeroStudy ka AI Teacher hai. Tera naam "Aero Sir" hai.
+
+Tu CPL (Commercial Pilot License) aur AME (Aircraft Maintenance Engineering) students ko padhata hai.
+
+Rules:
+- Hinglish mein baat kar (Hindi + English mix) — bilkul ek friendly teacher ki tarah
+- Agar student Hindi mein pooche to Hindi mein jawab de, English mein pooche to English mein
+- Har jawab mein pehle concept clearly explain kar, phir aviation context mein example de
+- Jawab concise rakho — max 150 words, lekin complete hona chahiye
+- Bullet points use kar jab list banana ho
+- Agar koi aviation se related nahi sawaal pooche, politely redirect kar
+- Hamesha encouraging rehna — "Bahut accha sawaal hai!", "Bilkul sahi socha!" jaise phrases use kar
+- Important terms bold karo using **term** format
+- Agar formula ho to clearly likho
+
+Tu ek experienced aviation instructor hai jo students ko genuinely samajhna chahta hai."""
+
+
+class Message(BaseModel):
+    role: str   # "user" or "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: List[Message]
+    subject: str = ""   # optional: "navigation", "meteorology", etc.
+
+
+@app.post("/ai/chat")
+async def ai_chat(req: ChatRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="ANTHROPIC_API_KEY not set on server. Render.com pe env variable add karo."
+        )
+
+    # Build messages for Claude
+    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+
+    # If subject context given, prepend it to first user message
+    if req.subject and messages:
+        first = messages[0]
+        if first["role"] == "user":
+            messages[0] = {
+                "role": "user",
+                "content": f"[Subject context: {req.subject}]\n{first['content']}"
+            }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 512,
+                    "system": AI_SYSTEM_PROMPT,
+                    "messages": messages,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            reply = data["content"][0]["text"]
+            return {"reply": reply}
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Claude API error: {e.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ─────────────────────────────────────────────────────────
 #  ROOT
@@ -20,142 +106,70 @@ def root():
     return {"message": "AeroStudy API is live ✈️"}
 
 
-# ─────────────────────────────────────────────────────────
-#  CPL  –  all subjects list
-# ─────────────────────────────────────────────────────────
 @app.get("/cpl/subjects")
 def get_cpl_subjects():
-    return [
-        {
-            "id": s["id"],
-            "name": s["name"],
-            "icon": s["icon"],
-            "description": s["description"],
-        }
-        for s in CPL_SUBJECTS
-    ]
+    return [{"id": s["id"], "name": s["name"], "icon": s["icon"], "description": s["description"]} for s in CPL_SUBJECTS]
 
-
-# ─────────────────────────────────────────────────────────
-#  CPL  –  detail of one subject
-# ─────────────────────────────────────────────────────────
 @app.get("/cpl/subjects/{subject_id}")
 def get_cpl_subject(subject_id: str):
     subject = next((s for s in CPL_SUBJECTS if s["id"] == subject_id), None)
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    if not subject: raise HTTPException(status_code=404, detail="Subject not found")
     return subject
 
-
-# ─────────────────────────────────────────────────────────
-#  CPL  –  notes for a subject
-# ─────────────────────────────────────────────────────────
 @app.get("/cpl/subjects/{subject_id}/notes")
 def get_cpl_notes(subject_id: str):
     subject = next((s for s in CPL_SUBJECTS if s["id"] == subject_id), None)
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    if not subject: raise HTTPException(status_code=404, detail="Subject not found")
     return {"subject_id": subject_id, "notes": subject.get("notes", [])}
 
-
-# ─────────────────────────────────────────────────────────
-#  CPL  –  questions for a subject
-# ─────────────────────────────────────────────────────────
 @app.get("/cpl/subjects/{subject_id}/questions")
 def get_cpl_questions(subject_id: str):
     subject = next((s for s in CPL_SUBJECTS if s["id"] == subject_id), None)
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    if not subject: raise HTTPException(status_code=404, detail="Subject not found")
     return {"subject_id": subject_id, "questions": subject.get("questions", [])}
 
-
-# ─────────────────────────────────────────────────────────
-#  CPL  –  MCQs for a subject
-# ─────────────────────────────────────────────────────────
 @app.get("/cpl/subjects/{subject_id}/mcq")
 def get_cpl_mcq(subject_id: str):
     subject = next((s for s in CPL_SUBJECTS if s["id"] == subject_id), None)
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    if not subject: raise HTTPException(status_code=404, detail="Subject not found")
     return {"subject_id": subject_id, "mcq": subject.get("mcq", [])}
 
-
-# ─────────────────────────────────────────────────────────
-#  CPL  –  mock tests for a subject
-# ─────────────────────────────────────────────────────────
 @app.get("/cpl/subjects/{subject_id}/mock-tests")
 def get_cpl_mock_tests(subject_id: str):
     subject = next((s for s in CPL_SUBJECTS if s["id"] == subject_id), None)
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    if not subject: raise HTTPException(status_code=404, detail="Subject not found")
     return {"subject_id": subject_id, "mock_tests": subject.get("mock_tests", [])}
 
-
-# ─────────────────────────────────────────────────────────
-#  AME  –  all modules list
-# ─────────────────────────────────────────────────────────
 @app.get("/ame/modules")
 def get_ame_modules():
-    return [
-        {
-            "id": m["id"],
-            "number": m["number"],
-            "title": m["title"],
-        }
-        for m in AME_MODULES
-    ]
+    return [{"id": m["id"], "number": m["number"], "title": m["title"]} for m in AME_MODULES]
 
-
-# ─────────────────────────────────────────────────────────
-#  AME  –  detail of one module
-# ─────────────────────────────────────────────────────────
 @app.get("/ame/modules/{module_id}")
 def get_ame_module(module_id: int):
     module = next((m for m in AME_MODULES if m["id"] == module_id), None)
-    if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
+    if not module: raise HTTPException(status_code=404, detail="Module not found")
     return module
 
-
-# ─────────────────────────────────────────────────────────
-#  AME  –  study material for a module
-# ─────────────────────────────────────────────────────────
 @app.get("/ame/modules/{module_id}/study-material")
 def get_ame_study_material(module_id: int):
     module = next((m for m in AME_MODULES if m["id"] == module_id), None)
-    if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
+    if not module: raise HTTPException(status_code=404, detail="Module not found")
     return {"module_id": module_id, "study_material": module.get("study_material", [])}
 
-
-# ─────────────────────────────────────────────────────────
-#  AME  –  diagrams for a module
-# ─────────────────────────────────────────────────────────
 @app.get("/ame/modules/{module_id}/diagrams")
 def get_ame_diagrams(module_id: int):
     module = next((m for m in AME_MODULES if m["id"] == module_id), None)
-    if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
+    if not module: raise HTTPException(status_code=404, detail="Module not found")
     return {"module_id": module_id, "diagrams": module.get("diagrams", [])}
 
-
-# ─────────────────────────────────────────────────────────
-#  AME  –  previous year questions for a module
-# ─────────────────────────────────────────────────────────
 @app.get("/ame/modules/{module_id}/questions")
 def get_ame_questions(module_id: int):
     module = next((m for m in AME_MODULES if m["id"] == module_id), None)
-    if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
+    if not module: raise HTTPException(status_code=404, detail="Module not found")
     return {"module_id": module_id, "questions": module.get("questions", [])}
 
-
-# ─────────────────────────────────────────────────────────
-#  AME  –  practice test for a module
-# ─────────────────────────────────────────────────────────
 @app.get("/ame/modules/{module_id}/practice-test")
 def get_ame_practice_test(module_id: int):
     module = next((m for m in AME_MODULES if m["id"] == module_id), None)
-    if not module:
-        raise HTTPException(status_code=404, detail="Module not found")
+    if not module: raise HTTPException(status_code=404, detail="Module not found")
     return {"module_id": module_id, "practice_test": module.get("practice_test", [])}
