@@ -17,11 +17,12 @@ app.add_middleware(
 )
 
 # ─────────────────────────────────────────────────────────
-#  AI TEACHER  –  Claude API se real response
-#  Render.com pe ANTHROPIC_API_KEY env variable set karo
+#  AI TEACHER  –  Gemini API se real response (FREE!)
+#  Render.com pe GEMINI_API_KEY env variable set karo
+#  Free key yahan se lo: https://aistudio.google.com
 # ─────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 AI_SYSTEM_PROMPT = """Tu AeroStudy ka AI Teacher hai. Tera naam "Aero Sir" hai.
 
@@ -53,47 +54,55 @@ class ChatRequest(BaseModel):
 
 @app.post("/ai/chat")
 async def ai_chat(req: ChatRequest):
-    if not ANTHROPIC_API_KEY:
+    if not GEMINI_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="ANTHROPIC_API_KEY not set on server. Render.com pe env variable add karo."
+            detail="GEMINI_API_KEY not set on server. Render.com pe env variable add karo. Free key: https://aistudio.google.com"
         )
 
-    # Build messages for Claude
-    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    # Build Gemini format messages
+    # Gemini mein "assistant" ko "model" kehte hain
+    gemini_messages = []
+    for m in req.messages:
+        role = "model" if m.role == "assistant" else "user"
+        gemini_messages.append({
+            "role": role,
+            "parts": [{"text": m.content}]
+        })
 
-    # If subject context given, prepend it to first user message
-    if req.subject and messages:
-        first = messages[0]
+    # Subject context first user message mein add karo
+    if req.subject and gemini_messages:
+        first = gemini_messages[0]
         if first["role"] == "user":
-            messages[0] = {
+            original_text = first["parts"][0]["text"]
+            gemini_messages[0] = {
                 "role": "user",
-                "content": f"[Subject context: {req.subject}]\n{first['content']}"
+                "parts": [{"text": f"[Subject context: {req.subject}]\n{original_text}"}]
             }
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
+                headers={"content-type": "application/json"},
                 json={
-                    "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 512,
-                    "system": AI_SYSTEM_PROMPT,
-                    "messages": messages,
+                    "system_instruction": {
+                        "parts": [{"text": AI_SYSTEM_PROMPT}]
+                    },
+                    "contents": gemini_messages,
+                    "generationConfig": {
+                        "maxOutputTokens": 512,
+                        "temperature": 0.7,
+                    }
                 },
             )
             resp.raise_for_status()
             data = resp.json()
-            reply = data["content"][0]["text"]
+            reply = data["candidates"][0]["content"]["parts"][0]["text"]
             return {"reply": reply}
 
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Claude API error: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {e.response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
