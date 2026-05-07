@@ -17,12 +17,12 @@ app.add_middleware(
 )
 
 # ─────────────────────────────────────────────────────────
-#  AI TEACHER  –  Gemini API se real response (FREE!)
-#  Render.com pe GEMINI_API_KEY env variable set karo
-#  Free key yahan se lo: https://aistudio.google.com
+#  AI TEACHER  –  Groq API (FREE! Fast! No rate limits!)
+#  Render.com pe GROQ_API_KEY env variable set karo
+#  Free key yahan se lo: https://console.groq.com
 # ─────────────────────────────────────────────────────────
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 AI_SYSTEM_PROMPT = """Tu AeroStudy ka AI Teacher hai. Tera naam "Aero Sir" hai.
 
@@ -54,55 +54,50 @@ class ChatRequest(BaseModel):
 
 @app.post("/ai/chat")
 async def ai_chat(req: ChatRequest):
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="GEMINI_API_KEY not set on server. Render.com pe env variable add karo. Free key: https://aistudio.google.com"
+            detail="GROQ_API_KEY not set on server. Render.com pe env variable add karo. Free key: https://console.groq.com"
         )
 
-    # Build Gemini format messages
-    # Gemini mein "assistant" ko "model" kehte hain
-    gemini_messages = []
+    # Build messages for Groq (same format as OpenAI)
+    messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
+
     for m in req.messages:
-        role = "model" if m.role == "assistant" else "user"
-        gemini_messages.append({
-            "role": role,
-            "parts": [{"text": m.content}]
-        })
+        messages.append({"role": m.role, "content": m.content})
 
     # Subject context first user message mein add karo
-    if req.subject and gemini_messages:
-        first = gemini_messages[0]
-        if first["role"] == "user":
-            original_text = first["parts"][0]["text"]
-            gemini_messages[0] = {
-                "role": "user",
-                "parts": [{"text": f"[Subject context: {req.subject}]\n{original_text}"}]
-            }
+    if req.subject:
+        for i, msg in enumerate(messages):
+            if msg["role"] == "user":
+                messages[i] = {
+                    "role": "user",
+                    "content": f"[Subject context: {req.subject}]\n{msg['content']}"
+                }
+                break
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}",
-                headers={"content-type": "application/json"},
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
                 json={
-                    "system_instruction": {
-                        "parts": [{"text": AI_SYSTEM_PROMPT}]
-                    },
-                    "contents": gemini_messages,
-                    "generationConfig": {
-                        "maxOutputTokens": 512,
-                        "temperature": 0.7,
-                    }
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": messages,
+                    "max_tokens": 512,
+                    "temperature": 0.7,
                 },
             )
             resp.raise_for_status()
             data = resp.json()
-            reply = data["candidates"][0]["content"]["parts"][0]["text"]
+            reply = data["choices"][0]["message"]["content"]
             return {"reply": reply}
 
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Gemini API error: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Groq API error: {e.response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
