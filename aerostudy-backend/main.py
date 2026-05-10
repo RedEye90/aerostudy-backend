@@ -15,12 +15,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-ADMIN_SECRET   = os.environ.get("ADMIN_SECRET", "aerostudy-admin-2024")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "aerostudy-admin-2024")
 
-# Gemini model — Flash is fast & free tier friendly
-GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_URL   = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+# Groq model — llama fast & free tier friendly
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 
 # ─────────────────────────────────────────────────────────
 #  Capt.Aero — AI System Prompt
@@ -118,25 +118,30 @@ def root():
 
 
 # ─────────────────────────────────────────────────────────
-#  AI CHAT — Capt.Aero (Gemini)
+#  AI CHAT — Capt.Aero (Groq)
 # ─────────────────────────────────────────────────────────
 @app.post("/ai/chat")
 async def ai_chat(req: ChatRequest):
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="GEMINI_API_KEY not set. Render.com pe env variable add karo."
+            detail="GROQ_API_KEY not set. Render.com pe env variable add karo."
         )
 
-    # Subject context pehle message mein inject karo
-    messages = [{"role": m.role, "content": m.content} for m in req.messages]
-    if req.subject and messages:
-        first = messages[0]
+    # Build messages list — system prompt pehle
+    messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
+
+    # Subject context pehle user message mein inject karo
+    user_messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    if req.subject and user_messages:
+        first = user_messages[0]
         if first["role"] == "user":
-            messages[0] = {
+            user_messages[0] = {
                 "role": "user",
                 "content": f"[Subject/Module context: {req.subject}]\n{first['content']}"
             }
+
+    messages.extend(user_messages)
 
     # Max tokens by context
     subj_lower = req.subject.lower()
@@ -147,45 +152,33 @@ async def ai_chat(req: ChatRequest):
     else:
         max_tok = 400
 
-    # ── Gemini API format ──
-    # Gemini: role must be "user" or "model" (not "assistant")
-    gemini_contents = []
-    for m in messages:
-        role = "model" if m["role"] == "assistant" else "user"
-        gemini_contents.append({
-            "role": role,
-            "parts": [{"text": m["content"]}]
-        })
-
     payload = {
-        "system_instruction": {
-            "parts": [{"text": AI_SYSTEM_PROMPT}]
-        },
-        "contents": gemini_contents,
-        "generationConfig": {
-            "maxOutputTokens": max_tok,
-            "temperature": 0.7,
-            "topP": 0.9,
-        }
+        "model"      : GROQ_MODEL,
+        "messages"   : messages,
+        "max_tokens" : max_tok,
+        "temperature": 0.7,
+        "top_p"      : 0.9,
     }
 
     try:
         async with httpx.AsyncClient(timeout=40.0) as client:
             resp = await client.post(
-                GEMINI_URL,
-                params={"key": GEMINI_API_KEY},
-                headers={"Content-Type": "application/json"},
+                GROQ_URL,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type" : "application/json",
+                },
                 json=payload,
             )
             resp.raise_for_status()
             data  = resp.json()
-            reply = data["candidates"][0]["content"]["parts"][0]["text"]
+            reply = data["choices"][0]["message"]["content"]
             return {"reply": reply}
 
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Gemini API error: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Groq API error: {e.response.text}")
     except (KeyError, IndexError) as e:
-        raise HTTPException(status_code=502, detail=f"Gemini response parse error: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Groq response parse error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
