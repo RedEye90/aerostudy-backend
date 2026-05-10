@@ -15,8 +15,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ADMIN_SECRET      = os.environ.get("ADMIN_SECRET", "aerostudy-admin-2024")  # Render pe change karo
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+ADMIN_SECRET   = os.environ.get("ADMIN_SECRET", "aerostudy-admin-2024")
+
+# Gemini model — Flash is fast & free tier friendly
+GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_URL   = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 # ─────────────────────────────────────────────────────────
 #  Capt.Aero — AI System Prompt
@@ -45,14 +49,13 @@ Tera role hai student ko DGCA exam crack karana aur aviation ka asli passion jag
 
 # ─────────────────────────────────────────────────────────
 #  In-memory admin push storage
-#  (Server restart pe reset hoga — proper DB ke liye MongoDB/Postgres lagao)
 # ─────────────────────────────────────────────────────────
-admin_diagrams       = {}   # {module_id: [diagram_dict, ...]}
-admin_study          = {}   # {module_id: [study_material_dict, ...]}
-admin_pyq            = {}   # {module_id: [question_dict, ...]}
-admin_practice_test  = {}   # {module_id: [mcq_dict, ...]}  ← NEW
-admin_cpl_notes      = {}   # {subject_id: [note_dict, ...]}
-admin_cpl_mcq        = {}   # {subject_id: [mcq_dict, ...]}
+admin_diagrams      = {}   # {module_id: [diagram_dict, ...]}
+admin_study         = {}   # {module_id: [study_material_dict, ...]}
+admin_pyq           = {}   # {module_id: [question_dict, ...]}
+admin_practice_test = {}   # {module_id: [mcq_dict, ...]}
+admin_cpl_notes     = {}   # {subject_id: [note_dict, ...]}
+admin_cpl_mcq       = {}   # {subject_id: [mcq_dict, ...]}
 
 
 # ─────────────────────────────────────────────────────────
@@ -115,18 +118,18 @@ def root():
 
 
 # ─────────────────────────────────────────────────────────
-#  AI CHAT — Capt.Aero
+#  AI CHAT — Capt.Aero (Gemini)
 # ─────────────────────────────────────────────────────────
 @app.post("/ai/chat")
 async def ai_chat(req: ChatRequest):
-    if not ANTHROPIC_API_KEY:
+    if not GEMINI_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="ANTHROPIC_API_KEY not set. Render.com pe env variable add karo."
+            detail="GEMINI_API_KEY not set. Render.com pe env variable add karo."
         )
 
+    # Subject context pehle message mein inject karo
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
-
     if req.subject and messages:
         first = messages[0]
         if first["role"] == "user":
@@ -135,38 +138,54 @@ async def ai_chat(req: ChatRequest):
                 "content": f"[Subject/Module context: {req.subject}]\n{first['content']}"
             }
 
-    # Determine max_tokens by context
+    # Max tokens by context
     subj_lower = req.subject.lower()
     if any(kw in subj_lower for kw in ["review", "auto-review", "adaptive"]):
-        max_tok = 800   # Auto-review needs more tokens
+        max_tok = 800
     elif any(kw in subj_lower for kw in ["diagram", "pyq", "video"]):
         max_tok = 600
     else:
         max_tok = 400
 
+    # ── Gemini API format ──
+    # Gemini: role must be "user" or "model" (not "assistant")
+    gemini_contents = []
+    for m in messages:
+        role = "model" if m["role"] == "assistant" else "user"
+        gemini_contents.append({
+            "role": role,
+            "parts": [{"text": m["content"]}]
+        })
+
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": AI_SYSTEM_PROMPT}]
+        },
+        "contents": gemini_contents,
+        "generationConfig": {
+            "maxOutputTokens": max_tok,
+            "temperature": 0.7,
+            "topP": 0.9,
+        }
+    }
+
     try:
         async with httpx.AsyncClient(timeout=40.0) as client:
             resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": max_tok,
-                    "system": AI_SYSTEM_PROMPT,
-                    "messages": messages,
-                },
+                GEMINI_URL,
+                params={"key": GEMINI_API_KEY},
+                headers={"Content-Type": "application/json"},
+                json=payload,
             )
             resp.raise_for_status()
             data  = resp.json()
-            reply = data["content"][0]["text"]
+            reply = data["candidates"][0]["content"]["parts"][0]["text"]
             return {"reply": reply}
 
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Claude API error: {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {e.response.text}")
+    except (KeyError, IndexError) as e:
+        raise HTTPException(status_code=502, detail=f"Gemini response parse error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -298,7 +317,6 @@ def get_ame_practice_test(module_id: int):
 
 # ─────────────────────────────────────────────────────────
 #  AME ADMIN PUSH endpoints
-#  Header: X-Admin-Secret: <your secret>
 # ─────────────────────────────────────────────────────────
 
 # ── Diagrams ──
@@ -370,7 +388,7 @@ def admin_clear_practice_test(module_id: int, x_admin_secret: str = Header(...))
     admin_practice_test[module_id] = []
     return {"status": "ok", "message": f"Practice test cleared for Module {module_id}"}
 
-# ── Admin: list all pushed content ──
+# ── Admin status ──
 @app.get("/admin/status")
 def admin_status(x_admin_secret: str = Header(...)):
     check_admin(x_admin_secret)
